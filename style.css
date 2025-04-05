@@ -162,31 +162,6 @@ body {
   color: #777;
 }
 
-#portals {
-  position: absolute;
-  bottom: 10px;
-  right: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  background-color: rgba(0, 0, 0, 0.5);
-  padding: 10px;
-  border-radius: 5px;
-}
-
-.portal-button {
-  padding: 8px 15px;
-  background-color: #44a;
-  color: white;
-  border: none;
-  border-radius: 5px;
-  cursor: pointer;
-}
-
-.portal-button:hover {
-  background-color: #66c;
-}
-
 #respawn-prompt {
   position: absolute;
   top: 50%;

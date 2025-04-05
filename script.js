@@ -4,7 +4,6 @@ const canvas = document.getElementById('game-canvas');
 const ctx = canvas.getContext('2d');
 const scoreElement = document.getElementById('score');
 const leaderboardList = document.getElementById('leaderboard-list');
-const portalsContainer = document.getElementById('portals');
 const healthBarFill = document.getElementById('health-bar-fill');
 const healthText = document.getElementById('health-text');
 const topLeftUiContainer = document.getElementById('top-left-ui'); // New container
@@ -44,7 +43,6 @@ let localPlayer = {
 let players = {}; // Store other players' data { clientId: { x, y, username, avatarUrl, score, health, maxHealth, dead } }
 let localChunks = {}; // Store chunk data generated locally { 'x_y': { npcs: [...], obstacles: [...] } }
 let remoteChunks = {}; // Store chunk data received from peers { 'x_y': { clientId: chunkData } }
-let activeChunkPortals = {}; // Store conflicting chunks needing resolution { 'x_y': [clientId1, clientId2, ...] }
 let bullets = []; // { x, y, vx, vy, ownerChunkX, ownerChunkY, type: 'shooter' | 'dodger' }
 let explosions = []; // { x, y, startTime, maxRadius }
 let camera = { x: 0, y: 0 };
@@ -153,14 +151,8 @@ function handlePresenceUpdateRequest(updateRequest, fromClientId) {
     if (updateRequest.type === 'requestChunkData') {
         const chunkId = updateRequest.chunkId;
         if (localChunks[chunkId]) {
+             // Respond directly to the requesting client
              room.send({ type: 'chunkDataResponse', chunkId, chunkData: localChunks[chunkId], targetClientId: fromClientId });
-        }
-    } else if (updateRequest.type === 'proposeChunkResolution') {
-        const chunkId = updateRequest.chunkId;
-        const proposedWinnerId = updateRequest.winnerClientId;
-        // Simple resolution: accept the proposal if we have a conflict for this chunk
-        if (activeChunkPortals[chunkId]) {
-            resolveChunkConflict(chunkId, proposedWinnerId);
         }
     } else if (updateRequest.type === 'requestResurrection') {
         // Only process if we are actually dead
@@ -191,10 +183,10 @@ function handleRoomMessages(event) {
             break;
         case 'chunkDataResponse':
              // Only process if the message is targeted at us
-            if (data.targetClientId === room.clientId) {
+             if (data.targetClientId === room.clientId) {
                 handleChunkDataResponse(data.chunkId, data.chunkData, data.clientId);
-            }
-            break;
+             }
+             break;
         case 'bulletFired':
             if (data.clientId !== room.clientId) { // Don't add our own bullets twice
                 bullets.push({ ...data.bulletData, remote: true });
@@ -440,7 +432,7 @@ function syncChunksWithPeer(peerId) {
     const visibleChunks = getVisibleChunkIds();
     visibleChunks.forEach(chunkId => {
          // Don't request data for chunks we already own locally unless there's a known conflict
-        if (!localChunks[chunkId] || activeChunkPortals[chunkId]) {
+        if (!localChunks[chunkId] || remoteChunks[chunkId]) {
             console.log(`Requesting chunk ${chunkId} from ${peerId}`);
              room.requestPresenceUpdate(peerId, { type: 'requestChunkData', chunkId });
         } else {
@@ -480,163 +472,119 @@ function checkForConflicts(chunkId) {
 
     // Conflict exists if more than one client has data for the chunk
     if (involvedClientIds.size > 1) {
-        console.warn(`Conflict detected for chunk ${chunkId} involving clients:`, Array.from(involvedClientIds));
-        if (!activeChunkPortals[chunkId]) {
-             activeChunkPortals[chunkId] = Array.from(involvedClientIds);
-             updatePortalUI();
-             // Initiate resolution process (e.g., simplest: client with lowest ID proposes itself)
-             proposeResolution(chunkId);
-        } else {
-            // Update existing portal participants if needed
-            const currentParticipants = new Set(activeChunkPortals[chunkId]);
-            let changed = false;
-            involvedClientIds.forEach(id => {
-                if (!currentParticipants.has(id)) {
-                    activeChunkPortals[chunkId].push(id);
-                    changed = true;
-                }
-            });
-             // Prune disconnected clients from portal list
-            activeChunkPortals[chunkId] = activeChunkPortals[chunkId].filter(id => room.peers[id]);
-             if(activeChunkPortals[chunkId].length <= 1) {
-                 // Conflict resolved due to disconnects
-                delete activeChunkPortals[chunkId];
-                changed = true;
-                 console.log(`Conflict for chunk ${chunkId} resolved automatically.`);
-                 // Ensure local chunk is the active one if it exists and is the only one left
-                 if(localChunks[chunkId] && activeChunkPortals[chunkId]?.[0] === room.clientId) {
-                    // Nothing to do, local is already active
-                 } else if (activeChunkPortals[chunkId]?.length === 1) {
-                    // Make the remaining remote chunk the active one locally
-                    const winnerId = activeChunkPortals[chunkId][0];
-                     if(remoteChunks[chunkId]?.[winnerId]) {
-                        localChunks[chunkId] = JSON.parse(JSON.stringify(remoteChunks[chunkId][winnerId])); // Deep copy
-                        saveChunksToLocalStorage();
-                     }
-                 }
-                delete remoteChunks[chunkId]; // Clean up remote copies once resolved locally
+        console.warn(`Conflict detected for chunk ${chunkId}. Participants: ${Array.from(involvedClientIds).join(', ')}. Auto-resolving...`);
+        // Auto-resolve: Pick the client with the lexicographically smallest ID as the winner.
+        // This acts as a deterministic "first joined" proxy.
+        const winnerClientId = Array.from(involvedClientIds).sort()[0];
+        resolveChunkConflict(chunkId, winnerClientId);
+    } else if (involvedClientIds.size === 1) {
+         // If only one client remains (could be due to disconnects resolving a conflict implicitly),
+         // ensure the local state reflects that client's data if it wasn't already the case.
+         const soleOwnerId = Array.from(involvedClientIds)[0];
+         if (soleOwnerId === room.clientId) {
+             // We are the sole owner, ensure no lingering remote data for this chunk
+             if (remoteChunks[chunkId]) {
+                 delete remoteChunks[chunkId];
+                 console.log(`Cleaned up remote data for chunk ${chunkId} as local client is sole owner.`);
              }
-
-            if (changed) {
-                updatePortalUI();
-            }
-        }
-    } else if (involvedClientIds.size <= 1 && activeChunkPortals[chunkId]) {
-         // Conflict potentially resolved if only one participant remains
-        console.log(`Conflict for chunk ${chunkId} appears resolved.`);
-        delete activeChunkPortals[chunkId];
-        updatePortalUI();
-         // Ensure the correct chunk is active locally
-         const remainingClientId = Array.from(involvedClientIds)[0];
-         if(remainingClientId === room.clientId && localChunks[chunkId]) {
-            // Local chunk is the winner, ensure no remote overlay
-            delete remoteChunks[chunkId];
-         } else if (remainingClientId && remoteChunks[chunkId]?.[remainingClientId]) {
-             localChunks[chunkId] = JSON.parse(JSON.stringify(remoteChunks[chunkId][remainingClientId])); // Deep copy remote chunk as local truth
-             saveChunksToLocalStorage();
-             delete remoteChunks[chunkId]; // Clean up now resolved remote copy
-         } else if (!remainingClientId && !localChunks[chunkId]) {
-             // No one has the chunk anymore? Might happen if everyone disconnected.
-             delete remoteChunks[chunkId];
+         } else {
+             // Another client is the sole owner. Ensure we have their data locally.
+             if (!localChunks[chunkId] || JSON.stringify(localChunks[chunkId]) !== JSON.stringify(remoteChunks[chunkId]?.[soleOwnerId])) {
+                 if (remoteChunks[chunkId]?.[soleOwnerId]) {
+                     console.log(`Adopting chunk ${chunkId} data from sole owner ${soleOwnerId}.`);
+                     localChunks[chunkId] = JSON.parse(JSON.stringify(remoteChunks[chunkId][soleOwnerId]));
+                     saveChunksToLocalStorage();
+                     delete remoteChunks[chunkId]; // Clean up after adopting
+                 } else {
+                      // We don't have the sole owner's data, request it.
+                     console.log(`Missing chunk ${chunkId} data from sole owner ${soleOwnerId}. Requesting...`);
+                     requestChunkDataFromPeer(chunkId, soleOwnerId);
+                 }
+             } else {
+                  // Local data already matches the sole owner's data (which might be null if they don't have it either)
+                  // Clean up remote chunk data if it exists
+                  if(remoteChunks[chunkId]) {
+                     delete remoteChunks[chunkId];
+                  }
+             }
          }
-    }
-}
-
-function proposeResolution(chunkId) {
-    // Simple strategy: client with the lexicographically smallest ID proposes themselves as the winner.
-    const participants = activeChunkPortals[chunkId].sort();
-    const proposerId = participants[0];
-
-    if (room.clientId === proposerId) {
-        console.log(`Proposing self (${room.clientId}) as winner for chunk ${chunkId}`);
-        // Broadcast proposal to other participants
-        participants.forEach(clientId => {
-            if (clientId !== room.clientId) {
-                room.requestPresenceUpdate(clientId, {
-                    type: 'proposeChunkResolution',
-                    chunkId: chunkId,
-                    winnerClientId: room.clientId
-                });
-            }
-        });
-         // Assume self-proposal is accepted immediately for simplicity in this demo
-         // A more robust system would wait for acknowledgements.
-         resolveChunkConflict(chunkId, room.clientId);
-    }
-}
+     }
+ }
 
 function resolveChunkConflict(chunkId, winnerClientId) {
     console.log(`Resolving conflict for chunk ${chunkId}, winner: ${winnerClientId}`);
 
-    if (!activeChunkPortals[chunkId]) return; // Already resolved or no conflict
-
     // Determine the winning chunk data
     let winningChunkData = null;
     if (winnerClientId === room.clientId) {
+        // Ensure local chunk exists if we are the winner (should generally be true)
+        if (!localChunks[chunkId]) {
+            console.warn(`Winner (${room.clientId}) declared for chunk ${chunkId}, but local data missing. Generating.`);
+            ensureChunkExists(chunkId); // Generate it if needed
+        }
         winningChunkData = localChunks[chunkId];
     } else if (remoteChunks[chunkId] && remoteChunks[chunkId][winnerClientId]) {
         winningChunkData = remoteChunks[chunkId][winnerClientId];
     } else {
-        // Winner's data isn't available locally, maybe request it again?
-        // For now, log error and potentially re-request if needed.
-        console.error(`Cannot resolve conflict for ${chunkId}: Winner ${winnerClientId}'s data not found locally.`);
-         if(room.peers[winnerClientId]) {
-            room.requestPresenceUpdate(winnerClientId, { type: 'requestChunkData', chunkId });
-         }
-        return; // Cannot resolve yet
+        // Winner's data isn't available locally. Request it.
+        console.warn(`Winner ${winnerClientId}'s data for chunk ${chunkId} not found locally. Requesting...`);
+          if(room.peers[winnerClientId]) {
+            requestChunkDataFromPeer(chunkId, winnerClientId);
+          }
+        // We cannot fully resolve *locally* until the data arrives.
+        // The winner is determined, but our local state might be out of sync temporarily.
+        // The received data will trigger handleChunkDataResponse -> checkForConflicts again.
+        return;
     }
 
-    // Make the winning chunk data the definitive local version
-    localChunks[chunkId] = JSON.parse(JSON.stringify(winningChunkData)); // Deep copy
+    // Make the winning chunk data the definitive local version (if different)
+    if (!localChunks[chunkId] || JSON.stringify(localChunks[chunkId]) !== JSON.stringify(winningChunkData)) {
+        console.log(`Updating local chunk ${chunkId} with winner (${winnerClientId}) data.`);
+        localChunks[chunkId] = JSON.parse(JSON.stringify(winningChunkData)); // Deep copy
+        saveChunksToLocalStorage();
+    } else {
+        console.log(`Local chunk ${chunkId} already matches winner (${winnerClientId}) data.`);
+    }
 
-    // Clean up remote data for this chunk and remove the portal
+    // Clean up remote data for this chunk now that it's resolved locally
     delete remoteChunks[chunkId];
-    delete activeChunkPortals[chunkId];
-
-    // Update UI and save the resolved state
-    updatePortalUI();
-    saveChunksToLocalStorage();
 
     console.log(`Conflict for chunk ${chunkId} resolved. Using data from ${winnerClientId}.`);
 }
 
 function cleanUpDisconnectedPeerChunks(disconnectedClientId) {
+    let potentiallyResolvedChunks = new Set();
     // Remove the disconnected peer's data from remoteChunks
     for (const chunkId in remoteChunks) {
         if (remoteChunks[chunkId][disconnectedClientId]) {
             delete remoteChunks[chunkId][disconnectedClientId];
-             // If the chunk no longer has any remote copies, delete the entry
+            potentiallyResolvedChunks.add(chunkId);
+              // If the chunk no longer has any remote copies, delete the entry
             if (Object.keys(remoteChunks[chunkId]).length === 0) {
                 delete remoteChunks[chunkId];
             }
         }
     }
-    // Re-check for conflicts, as the disconnection might resolve some
-    Object.keys(activeChunkPortals).forEach(chunkId => {
-        const index = activeChunkPortals[chunkId].indexOf(disconnectedClientId);
-        if (index > -1) {
-            activeChunkPortals[chunkId].splice(index, 1);
-            // If only one participant left, the conflict is resolved
-            if (activeChunkPortals[chunkId].length <= 1) {
-                 const remainingClientId = activeChunkPortals[chunkId][0];
-                 console.log(`Conflict for ${chunkId} resolved due to disconnect. Remaining: ${remainingClientId || 'none'}`);
-                 if(remainingClientId) {
-                    resolveChunkConflict(chunkId, remainingClientId); // Formally resolve
-                 } else {
-                     // No one left, just remove the portal entry
-                     delete activeChunkPortals[chunkId];
-                     updatePortalUI();
-                     // Decide if local chunk (if exists) should be kept or deleted
-                     // If local exists, keep it. Otherwise, no action needed.
-                 }
-            } else {
-                 updatePortalUI(); // Update portal UI if participants changed but conflict remains
-            }
-        }
+
+    // Re-check for conflicts on chunks affected by the disconnect
+    potentiallyResolvedChunks.forEach(chunkId => {
+        console.log(`Re-checking conflict status for chunk ${chunkId} after peer ${disconnectedClientId} disconnected.`);
+        checkForConflicts(chunkId);
     });
-     // Also remove the player from the main players list
-     delete players[disconnectedClientId];
-     updateLeaderboard();
+
+    // Also remove the player from the main players list
+    delete players[disconnectedClientId];
+    updateLeaderboard();
+}
+
+// Helper function to request specific chunk data from a peer
+function requestChunkDataFromPeer(chunkId, peerId) {
+     if (!peerId || !room.peers[peerId]) {
+         console.warn(`Cannot request chunk ${chunkId} from non-existent peer ${peerId}`);
+         return;
+     }
+     console.log(`Requesting chunk ${chunkId} specifically from peer ${peerId}`);
+     room.requestPresenceUpdate(peerId, { type: 'requestChunkData', chunkId });
 }
 
 // --- Game Logic ---
@@ -685,6 +633,7 @@ function updatePlayer(deltaTime) {
         const chunk = localChunks[chunkId]; // Use definitive local data
         if (chunk && chunk.obstacles) {
             chunk.obstacles.forEach(obstacle => {
+                if (!obstacle) return;
                 if (obstacle.type === 'wall') {
                     // AABB collision for rectangular walls
                     const playerLeft = tempNextX - PLAYER_RADIUS;
@@ -714,7 +663,7 @@ function updatePlayer(deltaTime) {
                              collisionY = true;
                          }
                     }
-                } else if (obstacle.type === 'random' || obstacle.radius) {
+                } else if (obstacle.radius) { // Assume circular if radius exists
                     // Circle collision for random obstacles
                     const dist = Math.sqrt((tempNextX - obstacle.x) ** 2 + (tempNextY - obstacle.y) ** 2);
                     const minRadius = PLAYER_RADIUS + (obstacle.radius || 0); // Use obstacle radius if available
@@ -740,7 +689,7 @@ function updatePlayer(deltaTime) {
                 }
             });
         }
-    });
+    };
 
 
      // Apply movement restrictions based on collisions
@@ -767,7 +716,7 @@ function updatePlayer(deltaTime) {
     // Only potentially add score if outside the main spawn area
     if (!inSpawn) {
         // Calculate distance factor for the current chunk to determine if it's "near spawn"
-        const distanceFactor = Math.sqrt(playerChunkCoords.x * playerChunkCoords.x + playerChunkCoords.y * playerChunkCoords.y);
+        const distanceFactor = Math.sqrt(playerChunkCoords.x**2 + playerChunkCoords.y**2);
         // Use a threshold similar to NPC generation logic, e.g., "close chunks"
         const nearSpawnThreshold = 5 + SPAWN_CHUNK_RADIUS;
 
@@ -840,8 +789,8 @@ function updateNPCs(deltaTime) {
     const now = Date.now();
 
     visibleChunks.forEach(chunkId => {
-        // Only update NPCs for chunks that are definitively local (not in conflict or resolved to local)
-        if (localChunks[chunkId] && (!activeChunkPortals[chunkId] || activeChunkPortals[chunkId]?.[0] === room.clientId)) {
+        // Check if chunk exists locally and there's no remote data for it (meaning no conflict or resolved to local)
+        if (localChunks[chunkId] && !remoteChunks[chunkId]) {
             const chunk = localChunks[chunkId];
              if(!chunk.npcs) chunk.npcs = []; // Ensure npcs array exists
 
@@ -963,6 +912,7 @@ function updateBullets(deltaTime) {
          const chunk = localChunks[bulletChunkId]; // Use definitive local data
          if(chunk && chunk.obstacles) {
              for(const obstacle of chunk.obstacles) {
+                 if (!obstacle) continue;
                  const dist = Math.sqrt((bullet.x - obstacle.x) ** 2 + (bullet.y - obstacle.y) ** 2);
                  if (dist < bullet.radius + obstacle.radius) {
                      // Trigger explosion for dodger bullets on obstacle hit
@@ -1067,6 +1017,7 @@ function draw() {
              // Draw obstacles
              if(chunk.obstacles) {
                 chunk.obstacles.forEach(obstacle => {
+                    if (!obstacle) return;
                     if (obstacle.type === 'wall') {
                         ctx.fillStyle = '#666'; // Wall color
                         ctx.fillRect(obstacle.x - obstacle.width / 2, obstacle.y - obstacle.height / 2, obstacle.width, obstacle.height);
@@ -1086,7 +1037,7 @@ function draw() {
                 });
             }
 
-             // Draw NPCs (only if not spawn chunk, handled by generation)
+             // Draw NPCs
             if(chunk.npcs && chunk.npcs.length > 0) {
                 chunk.npcs.forEach(npc => {
                     ctx.fillStyle = npc.type === 'shooter' ? '#f55' : '#f90'; // Red for shooters, orange for dodgers
@@ -1110,14 +1061,6 @@ function draw() {
             ctx.strokeRect(chunkX, chunkY, CHUNK_SIZE, CHUNK_SIZE);
             ctx.fillStyle = '#fff';
             ctx.fillText("Loading...", chunkX + 10, chunkY + 20);
-        }
-
-         // Draw portal indication if chunk is in conflict
-        if (activeChunkPortals[chunkId]) {
-            ctx.strokeStyle = '#0ff'; // Cyan border for conflicting chunks
-            ctx.lineWidth = 5;
-            ctx.strokeRect(chunkX + 5, chunkY + 5, CHUNK_SIZE - 10, CHUNK_SIZE - 10);
-            ctx.lineWidth = 1; // Reset line width
         }
     });
 
@@ -1347,52 +1290,6 @@ function updateLeaderboard() {
     li.appendChild(nameSpan);
     leaderboardList.appendChild(li);
   });
-}
-
-function updatePortalUI() {
-    portalsContainer.innerHTML = ''; // Clear previous buttons
-
-    if (Object.keys(activeChunkPortals).length > 0) {
-        portalsContainer.style.display = 'block';
-        const title = document.createElement('h4');
-        title.textContent = "Chunk Conflicts:";
-        portalsContainer.appendChild(title);
-
-        for (const chunkId in activeChunkPortals) {
-             // Check if the local player is actually near the conflicted chunk
-             const playerChunkId = getChunkId(localPlayer.x, localPlayer.y);
-             const nearbyChunks = getNearbyChunkIds(localPlayer.x, localPlayer.y, 1); // Check current and adjacent chunks
-             if (nearbyChunks.has(chunkId)) {
-
-                const chunkDiv = document.createElement('div');
-                chunkDiv.style.marginBottom = '5px';
-                const chunkLabel = document.createElement('span');
-                chunkLabel.textContent = `Chunk ${chunkId}: Choose owner -> `;
-                chunkDiv.appendChild(chunkLabel);
-
-                activeChunkPortals[chunkId].forEach(clientId => {
-                    const button = document.createElement('button');
-                    button.classList.add('portal-button');
-                    const peerInfo = room.peers[clientId];
-                    button.textContent = peerInfo?.username || clientId.substring(0, 6);
-                    button.title = `Choose ${peerInfo?.username || clientId}'s version for chunk ${chunkId}`;
-                    button.onclick = () => {
-                        // When clicked, broadcast the choice to resolve the conflict
-                        // Simplification: Directly resolve locally and assume others agree or will resolve similarly.
-                        // A robust system needs consensus.
-                        console.log(`Manually resolving ${chunkId} to ${clientId}`);
-                        resolveChunkConflict(chunkId, clientId);
-                        // Broadcast the resolution choice (optional, depends on resolution strategy)
-                        // e.g., send a message indicating manual resolution by this client.
-                    };
-                    chunkDiv.appendChild(button);
-                });
-                portalsContainer.appendChild(chunkDiv);
-            }
-        }
-    } else {
-        portalsContainer.style.display = 'none';
-    }
 }
 
 // --- Canvas Click Handling for Resurrection ---
