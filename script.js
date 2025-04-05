@@ -759,15 +759,43 @@ function updatePlayer(deltaTime) {
     // Update score based on time spent *outside* spawn area
     const now = Date.now();
     const playerChunkCoords = getChunkCoordinates(getChunkId(localPlayer.x, localPlayer.y));
-    const inSpawn = isSpawnChunk(playerChunkCoords.x, playerChunkCoords.y);
+    const playerChunkId = getChunkId(localPlayer.x, localPlayer.y); // Get chunk ID too
+    const inSpawn = isSpawnChunk(playerChunkCoords.x, playerChunkCoords.y); // Check if player is in main spawn area
 
+    let timeToAdd = 0; // Initialize time increment for score calculation
+
+    // Only potentially add score if outside the main spawn area
     if (!inSpawn) {
-        localPlayer.timeOutsideSpawnMs += deltaTime * 1000; // Add elapsed time in ms
+        // Calculate distance factor for the current chunk to determine if it's "near spawn"
+        const distanceFactor = Math.sqrt(playerChunkCoords.x * playerChunkCoords.x + playerChunkCoords.y * playerChunkCoords.y);
+        // Use a threshold similar to NPC generation logic, e.g., "close chunks"
+        const nearSpawnThreshold = 5 + SPAWN_CHUNK_RADIUS;
+
+        // Check if the current chunk is considered "near spawn"
+        if (distanceFactor < nearSpawnThreshold) {
+            const chunk = localChunks[playerChunkId];
+            // Check if this specific "near spawn" chunk has no enemies
+            const noEnemies = chunk && chunk.npcs && chunk.npcs.length === 0;
+
+            if (noEnemies) {
+                // Near spawn AND no enemies: Apply 1/1000th score rate.
+                // Normal rate adds deltaTime * 1000. 1/1000th is deltaTime * 1.
+                timeToAdd = deltaTime * 1;
+            } else {
+                // Near spawn BUT has enemies (or chunk data missing): Normal rate
+                timeToAdd = deltaTime * 1000;
+            }
+        } else {
+            // Far from spawn: Normal rate
+            timeToAdd = deltaTime * 1000;
+        }
+        localPlayer.timeOutsideSpawnMs += timeToAdd; // Add the calculated time increment
     }
+    // else: Inside spawn area, timeToAdd remains 0, no score increase.
+
     // Calculate score based on accumulated time outside spawn
     localPlayer.score = Math.floor(localPlayer.timeOutsideSpawnMs / 100);
     scoreElement.textContent = `Score: ${localPlayer.score}`;
-
 
     // Update UI Health Bar
     const healthPercentage = Math.max(0, (localPlayer.health / localPlayer.maxHealth) * 100);
