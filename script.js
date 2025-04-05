@@ -34,6 +34,7 @@ let localPlayer = {
   vx: 0,
   vy: 0,
   score: 0,
+  timeOutsideSpawnMs: 0, // Track time spent outside spawn chunk
   health: MAX_HEALTH,
   maxHealth: MAX_HEALTH,
   lastUpdateTime: Date.now(),
@@ -749,33 +750,34 @@ function updatePlayer(deltaTime) {
      }
 
 
-    // Update score based on time survived
+    // Update score based on time spent *outside* spawn
     const now = Date.now();
-    localPlayer.score = Math.floor((now - START_TIME) / 100); // 1 point per 100ms survived
+    const playerChunkId = getChunkId(localPlayer.x, localPlayer.y);
+
+    if (playerChunkId !== '0_0') {
+        localPlayer.timeOutsideSpawnMs += deltaTime * 1000; // Add elapsed time in ms
+    }
+    // Calculate score based on accumulated time outside spawn
+    localPlayer.score = Math.floor(localPlayer.timeOutsideSpawnMs / 100);
     scoreElement.textContent = `Score: ${localPlayer.score}`;
+
 
     // Update UI Health Bar
     const healthPercentage = Math.max(0, (localPlayer.health / localPlayer.maxHealth) * 100);
     healthBarFill.style.width = `${healthPercentage}%`;
-     // Change color based on health
-    if (healthPercentage < 30) {
-        healthBarFill.style.backgroundColor = '#f44336'; // Red
-    } else if (healthPercentage < 60) {
-        healthBarFill.style.backgroundColor = '#ff9800'; // Orange
-    } else {
-        healthBarFill.style.backgroundColor = '#4caf50'; // Green
-    }
+     if (healthPercentage < 30) healthBarFill.style.backgroundColor = '#f44336';
+     else if (healthPercentage < 60) healthBarFill.style.backgroundColor = '#ff9800';
+     else healthBarFill.style.backgroundColor = '#4caf50';
     healthText.textContent = `Health: ${Math.round(localPlayer.health)}/${localPlayer.maxHealth}`;
-
 
     // Send presence update periodically
     if (now - localPlayer.lastUpdateTime > 50) { // Update roughly 20 times/sec
         room.updatePresence({
             x: localPlayer.x,
             y: localPlayer.y,
-            score: localPlayer.score,
+            score: localPlayer.score, // Send updated score
             health: localPlayer.health,
-            maxHealth: localPlayer.maxHealth, // Send max health too, in case it changes later
+            maxHealth: localPlayer.maxHealth,
             dead: localPlayer.dead,
         });
         localPlayer.lastUpdateTime = now;
