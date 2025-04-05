@@ -9,6 +9,8 @@ const healthBarFill = document.getElementById('health-bar-fill');
 const healthText = document.getElementById('health-text');
 const topLeftUiContainer = document.getElementById('top-left-ui'); // New container
 const toggleUiButton = document.getElementById('toggle-ui-button'); // Toggle button
+const respawnPrompt = document.getElementById('respawn-prompt');
+const respawnButton = document.getElementById('respawn-button');
 
 const room = new WebsimSocket();
 
@@ -23,6 +25,8 @@ const BULLET_DAMAGE = 15; // Base damage per bullet hit
 const DODGER_BULLET_DAMAGE = 10; // Damage for dodger bullets
 const EXPLOSION_DURATION = 0.3; // seconds
 const EXPLOSION_RADIUS = 30; // Max radius of explosion effect
+const RESURRECT_RANGE = PLAYER_RADIUS * 4; // How close player needs to be to click-resurrect someone
+const CLICK_DETECTION_RADIUS = PLAYER_RADIUS * 2; // How close click needs to be to dead player body
 
 let localPlayer = {
   x: 0,
@@ -55,6 +59,8 @@ async function initializeGame() {
   window.addEventListener('keydown', handleKeyDown);
   window.addEventListener('keyup', handleKeyUp);
   toggleUiButton.addEventListener('click', toggleUiVisibility); // Add listener for toggle button
+  respawnButton.addEventListener('click', handleRespawnButtonClick);
+  canvas.addEventListener('click', handleCanvasClick); // Add listener for canvas clicks (resurrection)
 
   await room.initialize();
 
@@ -144,6 +150,14 @@ function handlePresenceUpdateRequest(updateRequest, fromClientId) {
         // Simple resolution: accept the proposal if we have a conflict for this chunk
         if (activeChunkPortals[chunkId]) {
             resolveChunkConflict(chunkId, proposedWinnerId);
+        }
+    } else if (updateRequest.type === 'requestResurrection') {
+        // Only process if we are actually dead
+        if (localPlayer.dead) {
+            console.log(`Received resurrection request from ${fromClientId}`);
+            resurrectPlayer(fromClientId); // Resurrect locally
+        } else {
+            console.log(`Received resurrection request from ${fromClientId}, but not dead.`);
         }
     }
     // Future: Handle damage requests here if PvP is added
@@ -959,9 +973,11 @@ function takeDamage(amount) {
             dead: true,
             health: localPlayer.health,
             x: localPlayer.x, // Send final position
-            y: localPlayer.y
+            y: localPlayer.y,
+            vx: 0, // Ensure velocity is zeroed in presence
+            vy: 0
         });
-         // TODO: Implement respawn logic or game over screen
+        showRespawnPrompt(); // Show the respawn UI
     } else {
          // Update presence with new health if not dead yet
          // This happens in the periodic update in updatePlayer, but could be sent immediately:
@@ -1333,6 +1349,135 @@ function updatePortalUI() {
     } else {
         portalsContainer.style.display = 'none';
     }
+}
+
+// --- Canvas Click Handling for Resurrection ---
+
+// Helper to convert screen coordinates to world coordinates
+function screenToWorldCoords(screenX, screenY) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    const worldX = (screenX - rect.left) * scaleX - (canvas.width / 2 - camera.x);
+    const worldY = (screenY - rect.top) * scaleY - (canvas.height / 2 - camera.y);
+
+    return { x: worldX, y: worldY };
+}
+
+function handleCanvasClick(event) {
+     // Don't allow resurrection attempts if the local player is dead
+    if (localPlayer.dead) return;
+
+    const worldCoords = screenToWorldCoords(event.clientX, event.clientY);
+    const clickX = worldCoords.x;
+    const clickY = worldCoords.y;
+
+    console.log(`Canvas clicked at screen (${event.clientX}, ${event.clientY}), world (${clickX.toFixed(1)}, ${clickY.toFixed(1)})`);
+
+    // Check if the click is near any dead player
+    for (const clientId in players) {
+        const deadPlayer = players[clientId];
+        if (deadPlayer.dead) {
+            const distToBody = Math.sqrt((clickX - deadPlayer.x) ** 2 + (clickY - deadPlayer.y) ** 2);
+             console.log(`Checking dead player ${deadPlayer.username} at (${deadPlayer.x.toFixed(1)}, ${deadPlayer.y.toFixed(1)}), click distance: ${distToBody.toFixed(1)}`);
+
+            if (distToBody <= CLICK_DETECTION_RADIUS) {
+                 // Check if the local player (resurrector) is close enough to the dead body
+                 const distPlayerToBody = Math.sqrt((localPlayer.x - deadPlayer.x) ** 2 + (localPlayer.y - deadPlayer.y) ** 2);
+                 console.log(`Local player distance to body: ${distPlayerToBody.toFixed(1)}`);
+
+                 if (distPlayerToBody <= RESURRECT_RANGE) {
+                    console.log(`Attempting to resurrect player ${clientId} (${deadPlayer.username})`);
+                    // Send a request to the dead player's client
+                    room.requestPresenceUpdate(clientId, { type: 'requestResurrection' });
+                    // Maybe add visual feedback locally (e.g., glowing effect)
+                    // Could also break here if only one resurrection per click is desired
+                 } else {
+                      console.log(`Click near dead player ${clientId}, but local player is too far away (${distPlayerToBody.toFixed(1)} > ${RESURRECT_RANGE}).`);
+                 }
+
+                // Click was near this body, no need to check others for this click event
+                return;
+            }
+        }
+    }
+     console.log("Click was not near any dead player body.");
+}
+
+// --- Respawn and Resurrection Logic ---
+
+function showRespawnPrompt() {
+    respawnPrompt.classList.remove('hidden');
+}
+
+function hideRespawnPrompt() {
+    respawnPrompt.classList.add('hidden');
+}
+
+function handleRespawnButtonClick() {
+    console.log("Respawn button clicked");
+    respawnPlayer();
+    hideRespawnPrompt();
+}
+
+function respawnPlayer() {
+    if (!localPlayer.dead) return; // Only respawn if dead
+
+    console.log("Respawning player...");
+    localPlayer.dead = false;
+    localPlayer.health = localPlayer.maxHealth;
+    localPlayer.x = 0; // Respawn at origin
+    localPlayer.y = 0;
+    localPlayer.vx = 0;
+    localPlayer.vy = 0;
+
+    // Update presence immediately
+    room.updatePresence({
+        dead: localPlayer.dead,
+        health: localPlayer.health,
+        x: localPlayer.x,
+        y: localPlayer.y,
+        vx: 0,
+        vy: 0
+        // Score might reset on respawn, or persist. Currently persists.
+    });
+
+     // Update UI elements immediately
+     const healthPercentage = 100;
+     healthBarFill.style.width = `${healthPercentage}%`;
+     healthBarFill.style.backgroundColor = '#4caf50'; // Green
+     healthText.textContent = `Health: ${Math.round(localPlayer.health)}/${localPlayer.maxHealth}`;
+}
+
+function resurrectPlayer(resurrectorClientId) {
+     if (!localPlayer.dead) return; // Only resurrect if dead
+
+    console.log(`Resurrected by ${resurrectorClientId}!`);
+    localPlayer.dead = false;
+    localPlayer.health = localPlayer.maxHealth * 0.5; // Resurrect with half health? Or full? Let's go with half.
+    localPlayer.vx = 0;
+    localPlayer.vy = 0;
+
+    // Update presence immediately
+    room.updatePresence({
+        dead: localPlayer.dead,
+        health: localPlayer.health,
+        x: localPlayer.x, // Keep position where they died
+        y: localPlayer.y,
+        vx: 0,
+        vy: 0
+    });
+
+     // Update UI elements immediately
+     const healthPercentage = Math.max(0, (localPlayer.health / localPlayer.maxHealth) * 100);
+     healthBarFill.style.width = `${healthPercentage}%`;
+      if (healthPercentage < 30) healthBarFill.style.backgroundColor = '#f44336';
+      else if (healthPercentage < 60) healthBarFill.style.backgroundColor = '#ff9800';
+      else healthBarFill.style.backgroundColor = '#4caf50';
+     healthText.textContent = `Health: ${Math.round(localPlayer.health)}/${localPlayer.maxHealth}`;
+
+     hideRespawnPrompt(); // Hide prompt if it was visible
 }
 
 // --- Game Loop ---
