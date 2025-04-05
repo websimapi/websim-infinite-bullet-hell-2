@@ -18,7 +18,6 @@ const CHUNK_SIZE = 512; // Size of each chunk in pixels
 const PLAYER_RADIUS = 10;
 const BULLET_RADIUS = 5;
 const MAX_SPEED = 3;
-const START_TIME = Date.now();
 const MAX_HEALTH = 100;
 const HEALTH_REGEN_RATE = 2; // Health points per second
 const BULLET_DAMAGE = 15; // Base damage per bullet hit
@@ -27,6 +26,7 @@ const EXPLOSION_DURATION = 0.3; // seconds
 const EXPLOSION_RADIUS = 30; // Max radius of explosion effect
 const RESURRECT_RANGE = PLAYER_RADIUS * 4; // How close player needs to be to click-resurrect someone
 const CLICK_DETECTION_RADIUS = PLAYER_RADIUS * 2; // How close click needs to be to dead player body
+const SPAWN_CHUNK_RADIUS = 1; // Defines the spawn area around 0,0. 0 = only 0,0. 1 = -1 to 0 range (2x2). 2 = -2 to 1 range (4x4) etc.
 
 let localPlayer = {
   x: 0,
@@ -51,6 +51,16 @@ let camera = { x: 0, y: 0 };
 let keys = {};
 
 const noise2D = createNoise2D();
+
+// Helper function to check if a chunk is within the defined spawn area
+function isSpawnChunk(chunkX, chunkY) {
+    // Spawn area is defined from -SPAWN_CHUNK_RADIUS to SPAWN_CHUNK_RADIUS-1
+    // e.g. SPAWN_CHUNK_RADIUS = 1 --> range -1 to 0 (2x2 chunks: -1,-1; -1,0; 0,-1; 0,0)
+    // e.g. SPAWN_CHUNK_RADIUS = 2 --> range -2 to 1 (4x4 chunks)
+    const minCoord = -SPAWN_CHUNK_RADIUS;
+    const maxCoord = SPAWN_CHUNK_RADIUS - 1;
+    return chunkX >= minCoord && chunkX <= maxCoord && chunkY >= minCoord && chunkY <= maxCoord;
+}
 
 // --- Game Initialization ---
 
@@ -242,7 +252,8 @@ function generateChunkData(chunkX, chunkY) {
     const chunkId = `${chunkX}_${chunkY}`;
     const npcs = [];
     const obstacles = [];
-    const distanceFactor = Math.sqrt(chunkX * chunkX + chunkY * chunkY);
+    const isInSpawnArea = isSpawnChunk(chunkX, chunkY);
+    const distanceFactor = Math.sqrt(chunkX * chunkX + chunkY * chunkY); // Distance from absolute (0,0)
     const seed = chunkX * 10000 + chunkY; // Simple seed based on coords
     const chunkNoise = createNoise2D(() => seed); // Seeded noise for this chunk
 
@@ -253,43 +264,39 @@ function generateChunkData(chunkX, chunkY) {
     let shooterProbability = 0;
     let canShoot = false;
 
-    // Spawn Chunk (0,0) - Explicitly 0 NPCs and add walls/gates
-    if (chunkX === 0 && chunkY === 0) {
-        numNpcs = 0; // Absolutely no NPCs in spawn
-        console.log(`Chunk ${chunkId}: Generating Spawn Walls.`);
+    // Spawn Area (Defined by isSpawnChunk) - No NPCs, No random obstacles
+    if (isInSpawnArea) {
+        numNpcs = 0; // Absolutely no NPCs in the spawn area
+        console.log(`Chunk ${chunkId}: In spawn area, no NPCs or random obstacles.`);
 
-        // Define wall properties
-        const wallThickness = 20;
-        const halfChunk = CHUNK_SIZE / 2;
-        const gateWidth = 80; // Width of the openings
-        const halfGate = gateWidth / 2;
+        // Only add walls/gates to the absolute central chunk (0,0) for now
+        if (chunkX === 0 && chunkY === 0) {
+            console.log(`Chunk ${chunkId}: Generating Spawn Walls in central chunk.`);
+            // Define wall properties
+            const wallThickness = 20;
+            const halfChunk = CHUNK_SIZE / 2;
+            const gateWidth = 80; // Width of the openings
+            const halfGate = gateWidth / 2;
+            const wallColor = '#666'; // Give walls a distinct color if needed later
+            const segmentLengthX = (CHUNK_SIZE - gateWidth) / 2;
+            const segmentLengthY = (CHUNK_SIZE - gateWidth) / 2;
 
-        // Create walls as obstacles (rectangles for simplicity, using radius conceptually)
-        // We'll represent thick walls with several large-radius obstacles or just conceptual lines for now
-        // Using simple rectangular obstacles:
-        const wallColor = '#666'; // Give walls a distinct color if needed later
-
-        // Wall segment calculations to leave gates centered
-        const segmentLengthX = (CHUNK_SIZE - gateWidth) / 2;
-        const segmentLengthY = (CHUNK_SIZE - gateWidth) / 2;
-
-        // North Wall (two segments)
-        obstacles.push({ id: `obs_spawn_n1`, x: -halfChunk + segmentLengthX / 2, y: -halfChunk + wallThickness / 2, width: segmentLengthX, height: wallThickness, type: 'wall' });
-        obstacles.push({ id: `obs_spawn_n2`, x: halfChunk - segmentLengthX / 2, y: -halfChunk + wallThickness / 2, width: segmentLengthX, height: wallThickness, type: 'wall' });
-        // South Wall (two segments)
-        obstacles.push({ id: `obs_spawn_s1`, x: -halfChunk + segmentLengthX / 2, y: halfChunk - wallThickness / 2, width: segmentLengthX, height: wallThickness, type: 'wall' });
-        obstacles.push({ id: `obs_spawn_s2`, x: halfChunk - segmentLengthX / 2, y: halfChunk - wallThickness / 2, width: segmentLengthX, height: wallThickness, type: 'wall' });
-        // West Wall (two segments)
-        obstacles.push({ id: `obs_spawn_w1`, x: -halfChunk + wallThickness / 2, y: -halfChunk + segmentLengthY / 2, width: wallThickness, height: segmentLengthY, type: 'wall' });
-        obstacles.push({ id: `obs_spawn_w2`, x: -halfChunk + wallThickness / 2, y: halfChunk - segmentLengthY / 2, width: wallThickness, height: segmentLengthY, type: 'wall' });
-        // East Wall (two segments)
-        obstacles.push({ id: `obs_spawn_e1`, x: halfChunk - wallThickness / 2, y: -halfChunk + segmentLengthY / 2, width: wallThickness, height: segmentLengthY, type: 'wall' });
-        obstacles.push({ id: `obs_spawn_e2`, x: halfChunk - wallThickness / 2, y: halfChunk - segmentLengthY / 2, width: wallThickness, height: segmentLengthY, type: 'wall' });
-
-
+            // North Wall (two segments)
+            obstacles.push({ id: `obs_spawn_n1`, x: -halfChunk + segmentLengthX / 2, y: -halfChunk + wallThickness / 2, width: segmentLengthX, height: wallThickness, type: 'wall' });
+            obstacles.push({ id: `obs_spawn_n2`, x: halfChunk - segmentLengthX / 2, y: -halfChunk + wallThickness / 2, width: segmentLengthX, height: wallThickness, type: 'wall' });
+            // South Wall (two segments)
+            obstacles.push({ id: `obs_spawn_s1`, x: -halfChunk + segmentLengthX / 2, y: halfChunk - wallThickness / 2, width: segmentLengthX, height: wallThickness, type: 'wall' });
+            obstacles.push({ id: `obs_spawn_s2`, x: halfChunk - segmentLengthX / 2, y: halfChunk - wallThickness / 2, width: segmentLengthX, height: wallThickness, type: 'wall' });
+            // West Wall (two segments)
+            obstacles.push({ id: `obs_spawn_w1`, x: -halfChunk + wallThickness / 2, y: -halfChunk + segmentLengthY / 2, width: wallThickness, height: segmentLengthY, type: 'wall' });
+            obstacles.push({ id: `obs_spawn_w2`, x: -halfChunk + wallThickness / 2, y: halfChunk - segmentLengthY / 2, width: wallThickness, height: segmentLengthY, type: 'wall' });
+            // East Wall (two segments)
+            obstacles.push({ id: `obs_spawn_e1`, x: halfChunk - wallThickness / 2, y: -halfChunk + segmentLengthY / 2, width: wallThickness, height: segmentLengthY, type: 'wall' });
+            obstacles.push({ id: `obs_spawn_e2`, x: halfChunk - wallThickness / 2, y: halfChunk - segmentLengthY / 2, width: wallThickness, height: segmentLengthY, type: 'wall' });
+        }
     }
-    // Immediate adjacent chunks (distanceFactor approx 1 to 1.41)
-    else if (distanceFactor < 2) {
+    // Immediate adjacent chunks (distanceFactor approx 1 to 1.41) - OUTSIDE spawn area
+    else if (distanceFactor < 2 + SPAWN_CHUNK_RADIUS) { // Adjust threshold based on spawn size
          // Have a *chance* to spawn 1 NPC, not guaranteed
         if (chunkNoise(0,0) > 0.5) { // ~50% chance for 1 NPC
              numNpcs = 1;
@@ -300,19 +307,19 @@ function generateChunkData(chunkX, chunkY) {
         baseShootInterval = 18000 + Math.random() * 4000; // Even rarer shots (18-22s)
         shooterProbability = 0; // Still no shooters
         canShoot = false; // Cannot shoot this close
-        console.log(`Chunk ${chunkId}: Adjacent to spawn, ${numNpcs} NPCs (slow, dodger only).`);
+        console.log(`Chunk ${chunkId}: Adjacent to spawn area, ${numNpcs} NPCs (slow, dodger only).`);
     }
-    // Close chunks (distanceFactor 2 to < 5)
-    else if (distanceFactor < 5) {
+    // Close chunks (distanceFactor 2 to < 5) - OUTSIDE spawn area
+    else if (distanceFactor < 5 + SPAWN_CHUNK_RADIUS) { // Adjust threshold based on spawn size
         // Max 1-2 NPCs, scaling slowly with noise
         numNpcs = Math.floor((chunkNoise(0,0) + 1) / 2 * 1.5); // 0, 1, or rarely 2 NPCs
         npcBaseSpeed = 0.5 + distanceFactor * 0.05; // Slightly faster: 0.6 to 0.75
         baseShootInterval = 5000 + Math.random() * 3000; // 5-8s interval
         shooterProbability = 0.05; // Very small chance of shooters
         canShoot = shooterProbability > 0; // Can only shoot if there's a chance of being a shooter
-        console.log(`Chunk ${chunkId}: Close to spawn, ${numNpcs} NPCs.`);
+        console.log(`Chunk ${chunkId}: Close to spawn area, ${numNpcs} NPCs.`);
     }
-    // Further out chunks (distanceFactor >= 5)
+    // Further out chunks (distanceFactor >= 5) - OUTSIDE spawn area
     else {
         // Start with 1-2 base NPCs, scale slower
         numNpcs = 1 + Math.floor((chunkNoise(0,0) + 1) / 2 * (distanceFactor / 2)); // Scale more gradually, max depends on distance
@@ -322,11 +329,11 @@ function generateChunkData(chunkX, chunkY) {
         baseShootInterval = 2500 + Math.random() * 1500; // 2.5-4s interval (more frequent further out)
         shooterProbability = 0.2 + Math.min(0.4, distanceFactor * 0.015); // Increase shooter probability slower, capped lower
         canShoot = true;
-        console.log(`Chunk ${chunkId}: Farther out, ${numNpcs} NPCs (scaling).`);
+        console.log(`Chunk ${chunkId}: Farther out from spawn area, ${numNpcs} NPCs (scaling).`);
     }
 
-    // Generate the NPCs *only if* not in spawn chunk
-    if (chunkX !== 0 || chunkY !== 0) {
+    // Generate the NPCs *only if* not in the spawn area
+    if (!isInSpawnArea) {
         for (let i = 0; i < numNpcs; i++) {
             // Decide NPC type based on probability
             const npcType = (shooterProbability > 0 && Math.random() < shooterProbability) ? 'shooter' : 'dodger';
@@ -351,28 +358,27 @@ function generateChunkData(chunkX, chunkY) {
 
 
     // --- Obstacle Generation ---
-     // Keep obstacle generation similar, maybe slightly fewer near spawn
+     // Only generate random obstacles outside the defined spawn area
     let numObstacles = 0;
-     // Only generate random obstacles outside spawn and immediate neighbours
-     if (distanceFactor >= 2) {
-         numObstacles = Math.floor((chunkNoise(100, 100) + 1) / 2 * (2 + distanceFactor * 0.4) + 1); // Fewer base obstacles, scale slightly slower
-     }
+    if (!isInSpawnArea) {
+        // Similar logic as before, scaling with distance
+        numObstacles = Math.floor((chunkNoise(100, 100) + 1) / 2 * (2 + distanceFactor * 0.4) + 1);
 
-     for (let i = 0; i < numObstacles; i++) {
-        // Map noise from [-1, 1] to [0, 1] for positioning within the chunk, adding margins
-        const normalizedNoiseX = (chunkNoise(200 + i, 200 + i) + 1) / 2;
-        const normalizedNoiseY = (chunkNoise(300 + i, 300 + i) + 1) / 2;
-        // Map noise from [-1, 1] to [0, 1] for radius calculation
-        const normalizedNoiseRadius = (chunkNoise(400 + i, 400 + i) + 1) / 2;
+        for (let i = 0; i < numObstacles; i++) {
+            // Map noise from [-1, 1] to [0, 1] for positioning within the chunk, adding margins
+            const normalizedNoiseX = (chunkNoise(200 + i, 200 + i) + 1) / 2;
+            const normalizedNoiseY = (chunkNoise(300 + i, 300 + i) + 1) / 2;
+            // Map noise from [-1, 1] to [0, 1] for radius calculation
+            const normalizedNoiseRadius = (chunkNoise(400 + i, 400 + i) + 1) / 2;
 
-        obstacles.push({
-            id: `obs_${chunkId}_${i}`,
-            x: chunkX * CHUNK_SIZE + normalizedNoiseX * CHUNK_SIZE * 0.8 + CHUNK_SIZE * 0.1, // Position within 80% of chunk, offset by 10%
-            y: chunkY * CHUNK_SIZE + normalizedNoiseY * CHUNK_SIZE * 0.8 + CHUNK_SIZE * 0.1,
-             // Slightly smaller obstacles near spawn, scale slower
-            radius: normalizedNoiseRadius * 10 + 8 + Math.min(12, distanceFactor * 1.0), // Radius: base 8-18, scales slightly slower with distance up to +12
-            type: 'random' // Differentiate from walls
-        });
+            obstacles.push({
+                id: `obs_${chunkId}_${i}`,
+                x: chunkX * CHUNK_SIZE + normalizedNoiseX * CHUNK_SIZE * 0.8 + CHUNK_SIZE * 0.1, // Position within 80% of chunk, offset by 10%
+                y: chunkY * CHUNK_SIZE + normalizedNoiseY * CHUNK_SIZE * 0.8 + CHUNK_SIZE * 0.1,
+                radius: normalizedNoiseRadius * 10 + 8 + Math.min(12, distanceFactor * 1.0), // Radius: base 8-18, scales slightly slower with distance up to +12
+                type: 'random' // Differentiate from walls
+            });
+        }
     }
 
 
@@ -750,11 +756,12 @@ function updatePlayer(deltaTime) {
      }
 
 
-    // Update score based on time spent *outside* spawn
+    // Update score based on time spent *outside* spawn area
     const now = Date.now();
-    const playerChunkId = getChunkId(localPlayer.x, localPlayer.y);
+    const playerChunkCoords = getChunkCoordinates(getChunkId(localPlayer.x, localPlayer.y));
+    const inSpawn = isSpawnChunk(playerChunkCoords.x, playerChunkCoords.y);
 
-    if (playerChunkId !== '0_0') {
+    if (!inSpawn) {
         localPlayer.timeOutsideSpawnMs += deltaTime * 1000; // Add elapsed time in ms
     }
     // Calculate score based on accumulated time outside spawn
@@ -986,14 +993,13 @@ function takeDamage(amount) {
          // room.updatePresence({ health: localPlayer.health });
     }
 
-     // Update UI immediately
+     // Update UI elements immediately
      const healthPercentage = Math.max(0, (localPlayer.health / localPlayer.maxHealth) * 100);
      healthBarFill.style.width = `${healthPercentage}%`;
       if (healthPercentage < 30) healthBarFill.style.backgroundColor = '#f44336';
       else if (healthPercentage < 60) healthBarFill.style.backgroundColor = '#ff9800';
       else healthBarFill.style.backgroundColor = '#4caf50';
      healthText.textContent = `Health: ${Math.round(localPlayer.health)}/${localPlayer.maxHealth}`;
-
 }
 
 function createExplosion(x, y) {
@@ -1232,25 +1238,33 @@ function drawPlayerHealthBar(ctx, x, y, health, maxHealth) {
 }
 
 function drawChunkGrid() {
-    const startX = Math.floor((camera.x - canvas.width / 2) / CHUNK_SIZE) * CHUNK_SIZE;
-    const startY = Math.floor((camera.y - canvas.height / 2) / CHUNK_SIZE) * CHUNK_SIZE;
-    const endX = Math.ceil((camera.x + canvas.width / 2) / CHUNK_SIZE) * CHUNK_SIZE;
-    const endY = Math.ceil((camera.y + canvas.height / 2) / CHUNK_SIZE) * CHUNK_SIZE;
+    const startChunkX = Math.floor((camera.x - canvas.width / 2) / CHUNK_SIZE);
+    const startChunkY = Math.floor((camera.y - canvas.height / 2) / CHUNK_SIZE);
+    const endChunkX = Math.ceil((camera.x + canvas.width / 2) / CHUNK_SIZE);
+    const endChunkY = Math.ceil((camera.y + canvas.height / 2) / CHUNK_SIZE);
 
-    ctx.strokeStyle = '#333'; // Dark grey grid lines
+    const minSpawnCoord = -SPAWN_CHUNK_RADIUS;
+    const maxSpawnCoord = SPAWN_CHUNK_RADIUS - 1;
+
     ctx.lineWidth = 1;
 
-    for (let x = startX; x <= endX; x += CHUNK_SIZE) {
-        ctx.beginPath();
-        ctx.moveTo(x, startY - CHUNK_SIZE); // Extend lines slightly beyond view
-        ctx.lineTo(x, endY + CHUNK_SIZE);
-        ctx.stroke();
-    }
-    for (let y = startY; y <= endY; y += CHUNK_SIZE) {
-        ctx.beginPath();
-        ctx.moveTo(startX - CHUNK_SIZE, y);
-        ctx.lineTo(endX + CHUNK_SIZE, y);
-        ctx.stroke();
+    for (let cx = startChunkX; cx <= endChunkX; cx++) {
+        for (let cy = startChunkY; cy <= endChunkY; cy++) {
+             const chunkX = cx * CHUNK_SIZE;
+             const chunkY = cy * CHUNK_SIZE;
+
+            // Draw normal grid line
+            ctx.strokeStyle = '#333';
+            ctx.strokeRect(chunkX, chunkY, CHUNK_SIZE, CHUNK_SIZE);
+
+            // Highlight spawn chunks with a different background/border
+            if (isSpawnChunk(cx, cy)) {
+                 ctx.fillStyle = 'rgba(0, 50, 80, 0.15)'; // Subtle blue tint for spawn area background
+                 ctx.fillRect(chunkX, chunkY, CHUNK_SIZE, CHUNK_SIZE);
+                 ctx.strokeStyle = 'rgba(50, 150, 200, 0.4)'; // Light blue border for spawn chunks
+                 ctx.strokeRect(chunkX, chunkY, CHUNK_SIZE, CHUNK_SIZE);
+            }
+        }
     }
 }
 
@@ -1429,10 +1443,17 @@ function respawnPlayer() {
     console.log("Respawning player...");
     localPlayer.dead = false;
     localPlayer.health = localPlayer.maxHealth;
-    localPlayer.x = 0; // Respawn at origin
+    // Ensure respawn location (0,0) is valid
+    const spawnChunkCoords = getChunkCoordinates(getChunkId(0, 0));
+    if (!isSpawnChunk(spawnChunkCoords.x, spawnChunkCoords.y)) {
+        console.warn("Respawn point (0,0) is outside the defined spawn area! Adjust SPAWN_CHUNK_RADIUS or respawn logic.");
+        // Fallback: maybe find the center of the spawn area?
+    }
+    localPlayer.x = 0; // Respawn at origin (center of spawn area)
     localPlayer.y = 0;
     localPlayer.vx = 0;
     localPlayer.vy = 0;
+    localPlayer.timeOutsideSpawnMs = 0; // Reset score timer on respawn
 
     // Update presence immediately
     room.updatePresence({
